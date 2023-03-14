@@ -99,6 +99,7 @@ impl Backend {
 
         bounds.height = bounds.height.min(target_height);
 
+        let now = std::time::Instant::now();
         if !layer.quads.is_empty() {
             self.quad_pipeline.draw(
                 gl,
@@ -109,17 +110,26 @@ impl Backend {
                 bounds,
             );
         }
+        log::debug!(
+            "** quad pipeline took {}ms",
+            std::time::Instant::now().duration_since(now).as_millis()
+        );
 
         if !layer.meshes.is_empty() {
             let scaled = transformation
                 * Transformation::scale(scale_factor, scale_factor);
 
+            let now = std::time::Instant::now();
             self.triangle_pipeline.draw(
                 &layer.meshes,
                 gl,
                 target_height,
                 scaled,
                 scale_factor,
+            );
+            log::debug!(
+                "** triangle pipeline took {}ms",
+                std::time::Instant::now().duration_since(now).as_millis()
             );
         }
 
@@ -203,6 +213,7 @@ impl Backend {
                 self.text_pipeline.queue(text);
             }
 
+            let now = std::time::Instant::now();
             self.text_pipeline.draw_queued(
                 gl,
                 transformation,
@@ -212,6 +223,10 @@ impl Backend {
                     width: bounds.width,
                     height: bounds.height,
                 },
+            );
+            log::debug!(
+                "** text pipeline took {}ms",
+                std::time::Instant::now().duration_since(now).as_millis()
             );
         }
     }

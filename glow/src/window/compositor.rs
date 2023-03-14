@@ -105,7 +105,12 @@ impl<Theme> iced_graphics::window::GLCompositor for Compositor<Theme> {
         }
 
         renderer.with_primitives(|backend, primitive| {
+            let now = std::time::Instant::now();
             backend.present(gl, primitive, viewport, overlay);
+            log::debug!(
+                "== backend present took {}ms",
+                std::time::Instant::now().duration_since(now).as_millis()
+            );
         });
     }
 }

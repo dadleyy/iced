@@ -82,8 +82,10 @@ where
         );
 
         let (first_builder, second_builder) = if settings.try_opengles_first {
+            log::debug!("attempting to use opengles before opengl");
             (opengles_builder, opengl_builder)
         } else {
+            log::debug!("attempting to use opengl before opengles");
             (opengl_builder, opengles_builder)
         };
 
@@ -121,12 +123,14 @@ where
 
         #[allow(unsafe_code)]
         unsafe {
+            log::debug!("attempting to make context current");
             context.make_current().expect("Make OpenGL context current")
         }
     };
 
     #[allow(unsafe_code)]
     let (compositor, renderer) = unsafe {
+        log::debug!("getting proc address");
         C::new(compositor_settings, |address| {
             context.get_proc_address(address)
         })?
@@ -158,6 +162,7 @@ where
     });
 
     let mut context = task::Context::from_waker(task::noop_waker_ref());
+    let mut last_event_time = None;
 
     let _ = event_loop.run_return(move |event, _, control_flow| {
         use glutin::event_loop::ControlFlow;
@@ -182,6 +187,43 @@ where
         };
 
         if let Some(event) = event {
+            let now = std::time::Instant::now();
+            if let Some(last) = &last_event_time {
+                let is_mouse = matches!(
+                    event,
+                    glutin::event::Event::WindowEvent {
+                        event: glutin::event::WindowEvent::MouseInput { .. },
+                        ..
+                    }
+                );
+
+                let is_start = matches!(
+                    event,
+                    glutin::event::Event::WindowEvent {
+                        event: glutin::event::WindowEvent::Touch(glutin::event::Touch { phase: glutin::event::TouchPhase::Started, .. }),
+                        ..
+                    }
+                );
+
+                let is_finish = matches!(
+                    event,
+                    glutin::event::Event::WindowEvent {
+                        event: glutin::event::WindowEvent::Touch(glutin::event::Touch { phase: glutin::event::TouchPhase::Ended, .. }),
+                        ..
+                    }
+                );
+
+                if is_mouse || is_start || is_finish {
+                    log::debug!(
+                        "[EVENTLOOP] time since last event in loop - {}ms (current: {event:?})",
+                        now.duration_since(*last).as_millis()
+                    );
+            last_event_time = Some(now);
+                } else {
+            last_event_time = Some(now);
+                }
+            }
+
             event_sender.start_send(event).expect("Send event");
 
             let poll = instance.as_mut().poll(&mut context);
@@ -264,6 +306,8 @@ async fn run_instance<A, E, C>(
 
     debug.startup_finished();
 
+    let mut last_clear = None;
+
     while let Some(event) = event_receiver.next().await {
         match event {
             event::Event::NewEvents(start_cause) => {
@@ -279,8 +323,24 @@ async fn run_instance<A, E, C>(
                     continue;
                 }
 
+                let full_start = std::time::Instant::now();
+
+                log::debug!(
+                    "----- 'MainEventsCleared' w/ {} events",
+                    events.len()
+                );
+                let now = std::time::Instant::now();
+                if let Some(last) = &last_clear {
+                    log::debug!(
+                        "-- time since last maineventscleared - {}ms",
+                        now.duration_since(*last).as_millis()
+                    );
+                }
+                last_clear = Some(now);
+
                 debug.event_processing_started();
 
+                let start = std::time::Instant::now();
                 let (interface_state, statuses) = user_interface.update(
                     &events,
                     state.cursor_position(),
@@ -288,12 +348,37 @@ async fn run_instance<A, E, C>(
                     &mut clipboard,
                     &mut messages,
                 );
+                log::debug!(
+                    "-- 'user_interface' updated in {} millis",
+                    std::time::Instant::now().duration_since(start).as_millis()
+                );
 
                 debug.event_processing_finished();
 
+                log::debug!("======= event log start ========");
+                let start = std::time::Instant::now();
                 for event in events.drain(..).zip(statuses.into_iter()) {
+                    if matches!(
+                        event.0,
+                        Event::Touch(
+                            iced_winit::touch::Event::FingerPressed { .. }
+                        )
+                    ) || matches!(
+                        event.0,
+                        Event::Touch(
+                            iced_winit::touch::Event::FingerLifted { .. }
+                        )
+                    ) {
+                        log::debug!("{event:?}");
+                    }
                     runtime.broadcast(event);
                 }
+                log::debug!("======= event log end ========");
+                log::debug!(
+                    "-- 'broadcast' finished in {}ms; has messages? {}",
+                    std::time::Instant::now().duration_since(start).as_millis(),
+                    !messages.is_empty()
+                );
 
                 if !messages.is_empty()
                     || matches!(
@@ -304,6 +389,8 @@ async fn run_instance<A, E, C>(
                     let mut cache =
                         ManuallyDrop::into_inner(user_interface).into_cache();
 
+                    log::debug!("-- applying application update");
+                    let start = std::time::Instant::now();
                     // Update application
                     application::update(
                         &mut application,
@@ -318,6 +405,12 @@ async fn run_instance<A, E, C>(
                         &mut messages,
                         context.window(),
                         || compositor.fetch_information(),
+                    );
+                    log::debug!(
+                        "-- 'application' updated in {}ms",
+                        std::time::Instant::now()
+                            .duration_since(start)
+                            .as_millis()
                     );
 
                     // Update window
@@ -335,6 +428,8 @@ async fn run_instance<A, E, C>(
                     if should_exit {
                         break;
                     }
+                } else {
+                    log::warn!("-- skipping application update");
                 }
 
                 // TODO: Avoid redrawing all the time by forcing widgets to
@@ -391,12 +486,18 @@ async fn run_instance<A, E, C>(
                     _ => ControlFlow::Wait,
                 });
 
+                let finished_time = std::time::Instant::now();
+                log::debug!(
+                    "~~~ maineventscleared finished in {}ms",
+                    finished_time.duration_since(full_start).as_millis()
+                );
                 redraw_pending = false;
             }
             event::Event::UserEvent(message) => {
                 messages.push(message);
             }
             event::Event::RedrawRequested(_) => {
+                let redraw_start = std::time::Instant::now();
                 #[cfg(feature = "tracing")]
                 let _ = info_span!("Application", "FRAME").entered();
 
@@ -417,14 +518,22 @@ async fn run_instance<A, E, C>(
                     let physical_size = state.physical_size();
                     let logical_size = state.logical_size();
 
+                    let start_relayout = std::time::Instant::now();
                     debug.layout_started();
                     user_interface = ManuallyDrop::new(
                         ManuallyDrop::into_inner(user_interface)
                             .relayout(logical_size, &mut renderer),
                     );
+                    log::debug!(
+                        "__ relayout took {}ms",
+                        std::time::Instant::now()
+                            .duration_since(start_relayout)
+                            .as_millis(),
+                    );
                     debug.layout_finished();
 
                     debug.draw_started();
+                    let start_draw = std::time::Instant::now();
                     let new_mouse_interaction = user_interface.draw(
                         &mut renderer,
                         state.theme(),
@@ -433,8 +542,16 @@ async fn run_instance<A, E, C>(
                         },
                         state.cursor_position(),
                     );
+                    log::debug!(
+                        "__ draw took {}ms",
+                        std::time::Instant::now()
+                            .duration_since(start_draw)
+                            .as_millis(),
+                    );
+
                     debug.draw_finished();
 
+                    let mouse_resize = std::time::Instant::now();
                     if new_mouse_interaction != mouse_interaction {
                         context.window().set_cursor_icon(
                             conversion::mouse_interaction(
@@ -453,18 +570,37 @@ async fn run_instance<A, E, C>(
                     compositor.resize_viewport(physical_size);
 
                     viewport_version = current_viewport_version;
+                    log::debug!(
+                        "__ resize/mouse took {}ms",
+                        std::time::Instant::now()
+                            .duration_since(mouse_resize)
+                            .as_millis(),
+                    );
                 }
 
+                let start_present = std::time::Instant::now();
                 compositor.present(
                     &mut renderer,
                     state.viewport(),
                     state.background_color(),
                     &debug.overlay(),
                 );
+                log::debug!(
+                    "__ present took {}ms",
+                    std::time::Instant::now()
+                        .duration_since(start_present)
+                        .as_millis(),
+                );
 
                 context.swap_buffers().expect("Swap buffers");
 
                 debug.render_finished();
+                log::debug!(
+                    "[REDRAW] redraw event finished in {}ms",
+                    std::time::Instant::now()
+                        .duration_since(redraw_start)
+                        .as_millis()
+                );
 
                 // TODO: Handle animations!
                 // Maybe we can use `ControlFlow::WaitUntil` for this.

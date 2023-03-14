@@ -313,6 +313,7 @@ pub fn update<'a, Message: Clone>(
     match event {
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
         | Event::Touch(touch::Event::FingerPressed { .. }) => {
+            log::debug!("[BUTTON PRESS STARTING]");
             if on_press.is_some() {
                 let bounds = layout.bounds();
 
